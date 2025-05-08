@@ -5,6 +5,11 @@ import torch.nn.functional as F
 import librosa
 import io
 import numpy as np
+from pydub import AudioSegment
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
 
 # Model
 class EmotionCNN(nn.Module):
@@ -41,66 +46,71 @@ class EmotionCNN(nn.Module):
 
 # Load the model
 model = EmotionCNN()
-model.load_state_dict(torch.load('emotion_cnn.pth', map_location = torch.device('cpu')))
+model.load_state_dict(torch.load('emotion_cnn.pth', map_location=torch.device('cpu')))
 model.eval()  # Set the model to evaluation mode
 
-# Emotion mapping
-emotion_mapping = {
-    'neutral': 0,
-    'calm': 1,
-    'happy': 2,
-    'sad': 3,
-    'angry': 4,
-    'fearful': 5,
-    'disgust': 6,
-    'surprised': 7
-}
+# Emotion labels
+emotion_labels = ['neutral', 'calm', 'happy', 'sad', 'angry', 'fearful', 'disgust', 'surprised']
 
 # Preprocessing function
-def preprocess_audio(file_path):
-    # Load audio file
-    audio, sr = librosa.load(file_path, sr=16000)
+def preprocess_audio(uploaded_file):
+    try:
+        # Read file and convert to wav using pydub
+        audio_segment = AudioSegment.from_file(uploaded_file)
+        audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+
+        # Export to a buffer in WAV format
+        wav_io = io.BytesIO()
+        audio_segment.export(wav_io, format='wav')
+        wav_io.seek(0)
+
+        # Load audio with librosa
+        audio, sr = librosa.load(wav_io, sr=16000)
+    except Exception as e:
+        st.error(f"Audio loading failed: {str(e)}")
+        st.stop()
 
     # Trim audio (remove leading/trailing silence)
     audio, _ = librosa.effects.trim(audio, top_db=20)
 
-    # Pad to 3 seconds (if shorter)
-    if len(audio) < 3 * sr:
-        padding = 3 * sr - len(audio)
+    # Pad or trim to 3 seconds
+    target_length = 3 * sr
+    if len(audio) < target_length:
+        padding = target_length - len(audio)
         audio = np.pad(audio, (0, padding), mode='constant')
-
-    # Resample to 16kHz (if needed)
-    audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+    else:
+        audio = audio[:target_length]
 
     # Extract MFCCs
     mfccs = librosa.feature.mfcc(y=audio, sr=16000, n_mfcc=40)
 
-    # Optionally extract Mel spectrogram
-    # melspectrogram = librosa.feature.melspectrogram(y=audio, sr=16000)
-
-    # Return the MFCC features (or mel spectrogram, based on your preference)
-    return mfccs.T  # Transpose so that shape is [time_steps, n_mfcc] (better for models)
+    return mfccs.T
 
 # Streamlit UI
 st.title('Emotion Detection from Audio')
 st.write('Upload an audio file and the model will predict the emotion.')
 
 # File uploader
-audio_file = st.file_uploader('Choose an audio file', type=['wav'])
+uploaded_file = st.file_uploader('Choose an audio file', type=['wav', 'mp3', 'ogg', 'm4a', 'flac', 'aac'])
 
-if audio_file is not None:
+if uploaded_file is not None:
     # Preprocess the audio file
-    audio_data = preprocess_audio(audio_file)
-    
-    # Convert to tensor and add batch dimension
-    audio_tensor = torch.tensor(audio_data, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
-    
-    # Get prediction
-    with torch.no_grad():
-        output = model(audio_tensor)
-        predicted_class = torch.argmax(output, dim=1).item()
+    audio_data = preprocess_audio(uploaded_file)
 
-    # Map the predicted class to the emotion
-    emotion = list(emotion_mapping.keys())[list(emotion_mapping.values()).index(predicted_class)]
-    
-    st.write(f'Predicted Emotion: {emotion}')
+    # Convert to tensor and add batch dimension
+    audio_tensor = torch.tensor(audio_data, dtype=torch.float32).unsqueeze(0)
+
+    # Check for minimum length
+    if audio_tensor.shape[1] < 20:
+        st.warning("Audio too short. Please upload at least 1-2 seconds of clear speech.")
+    else:
+        # Get prediction
+        with torch.no_grad():
+            output = model(audio_tensor)
+            probabilities = torch.softmax(output, dim=1)
+            predicted_class = torch.argmax(probabilities, dim=1).item()
+            confidence = probabilities[0, predicted_class].item()
+
+        # Show result
+        emotion = emotion_labels[predicted_class]
+        st.write(f'**Predicted Emotion:** {emotion} ({confidence:.2%} confidence)')

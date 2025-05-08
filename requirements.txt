@@ -3,3 +3,4 @@ torch==2.2.2
 librosa==0.10.1
 numpy>=1.25
 setuptools>=65.5.0
+pydub==0.25.1
